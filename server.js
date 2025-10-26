@@ -7,7 +7,9 @@ const cors = require("cors");
 const { Server } = require("socket.io");
 require("dotenv").config();
 
-// Initialize Express
+// -------------------------
+// Express & Server Setup
+// -------------------------
 const app = express();
 app.use(cors());
 app.use(express.json());
@@ -15,7 +17,6 @@ app.use(express.json());
 const PORT = process.env.PORT || 5000;
 const USE_HTTPS = process.env.USE_HTTPS === "true";
 
-// Choose HTTP or HTTPS
 let server;
 if (
   USE_HTTPS &&
@@ -31,52 +32,76 @@ if (
   console.log("🌐 Using HTTP (Render/Production)");
 }
 
-// Initialize Socket.IO
+// -------------------------
+// Socket.IO Setup
+// -------------------------
 const io = new Server(server, {
   cors: {
-    origin: "*", // Allow all for now; restrict to your Vercel domain later
+    origin: "*", // allow all for dev; restrict to frontend domain later
     methods: ["GET", "POST"],
   },
 });
 
-// Active socket connections
-const peers = new Map();
+// Map shortIds to real socketIds
+const idMap = new Map();
 
+// Generate short unique IDs
+function generateShortId() {
+  return Math.random().toString(36).substring(2, 7).toUpperCase();
+}
+
+// -------------------------
+// Socket.IO Events
+// -------------------------
 io.on("connection", (socket) => {
-  console.log(`🟢 Connected: ${socket.id}`);
-  peers.set(socket.id, true);
+  const shortId = generateShortId();
+  idMap.set(shortId, socket.id);
 
-  // Send connected ID to client
-  socket.emit("connect-success", { id: socket.id });
+  console.log(`🟢 Connected: ${socket.id} => ${shortId}`);
 
-  // ---- EVENTS ---- //
+  // Send the short ID to the connected client
+  socket.emit("connect-success", { id: shortId });
 
-  // Manual connection: Connect to a friend by ID
-  socket.on("connect-peer", (targetId) => {
-    console.log(`🔗 ${socket.id} is connecting to ${targetId}`);
-    io.to(targetId).emit("new-connection", socket.id);
+  // Connect manually via entered ID
+  socket.on("connect-peer", (targetShortId) => {
+    const targetSocketId = idMap.get(targetShortId);
+    if (targetSocketId) {
+      console.log(`🔗 ${shortId} connecting to ${targetShortId}`);
+      io.to(targetSocketId).emit("new-connection", shortId);
+    } else {
+      socket.emit("error-message", `❌ No user found with ID ${targetShortId}`);
+    }
   });
 
-  // Chat messaging
+  // Chat message handling
   socket.on("send-message", ({ to, msg }) => {
-    console.log(`💬 ${socket.id} -> ${to}: ${msg}`);
-    io.to(to).emit("receive-message", { from: socket.id, msg });
+    const targetSocketId = idMap.get(to);
+    if (targetSocketId) {
+      io.to(targetSocketId).emit("receive-message", { from: shortId, msg });
+    }
+    console.log(`💬 ${shortId} → ${to}: ${msg}`);
   });
 
-  // YouTube video sharing and playback synchronization
+  // Video sync and URL sharing
   socket.on("send-video", ({ to, url, action, time }) => {
-    console.log(`🎬 Video event from ${socket.id} to ${to} | ${action || url}`);
-    io.to(to).emit("receive-video", { url, action, time });
+    const targetSocketId = idMap.get(to);
+    if (targetSocketId) {
+      io.to(targetSocketId).emit("receive-video", { url, action, time });
+    }
+    console.log(`🎬 ${shortId} → ${to} | ${action || url}`);
   });
 
+  // Handle disconnection
   socket.on("disconnect", () => {
-    peers.delete(socket.id);
-    console.log(`🔴 Disconnected: ${socket.id}`);
-    io.emit("user-left", { id: socket.id });
+    console.log(`🔴 Disconnected: ${shortId} (${socket.id})`);
+    idMap.delete(shortId);
+    io.emit("user-left", { id: shortId });
   });
 });
 
-// Start server
+// -------------------------
+// Server Startup
+// -------------------------
 server.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
 });
