@@ -7,9 +7,6 @@ const cors = require("cors");
 const { Server } = require("socket.io");
 require("dotenv").config();
 
-// -------------------------
-// Express & Server Setup
-// -------------------------
 const app = express();
 app.use(cors());
 app.use(express.json());
@@ -26,82 +23,155 @@ if (
   const key = fs.readFileSync("./certs/key.pem");
   const cert = fs.readFileSync("./certs/cert.pem");
   server = https.createServer({ key, cert }, app);
-  console.log("✅ Using local HTTPS with mkcert");
 } else {
   server = http.createServer(app);
-  console.log("🌐 Using HTTP (Render/Production)");
 }
 
-// -------------------------
-// Socket.IO Setup
-// -------------------------
 const io = new Server(server, {
   cors: {
-    origin: "*", // allow all for dev; restrict to frontend domain later
+    origin: "*",
     methods: ["GET", "POST"],
   },
 });
 
-// Map shortIds to real socketIds
-const idMap = new Map();
-
-// Generate short unique IDs
+// Short ID generator (5 uppercase characters)
 function generateShortId() {
   return Math.random().toString(36).substring(2, 7).toUpperCase();
 }
 
-// -------------------------
-// Socket.IO Events
-// -------------------------
+// Maps shortId to { socketId, name, camOn, micOn }
+const peers = new Map();
+// Reverse map for socketId -> shortId
+const socketToShort = new Map();
+
+// Track host (first connected)
+let hostShortId = null;
+
+// Helper: get peer list as array for broadcast
+const buildPeerList = () => {
+  return Array.from(peers.values()).map((p) => ({
+    id: p.shortId,
+    name: p.name,
+    camOn: p.camOn,
+    micOn: p.micOn,
+  }));
+};
+
 io.on("connection", (socket) => {
   const shortId = generateShortId();
-  idMap.set(shortId, socket.id);
+  peers.set(shortId, {
+    socketId: socket.id,
+    shortId,
+    name: "",
+    camOn: true,
+    micOn: true,
+  });
+  socketToShort.set(socket.id, shortId);
 
-  console.log(`🟢 Connected: ${socket.id} => ${shortId}`);
+  // Set host if none present
+  if (!hostShortId) hostShortId = shortId;
 
-  // Send the short ID to the connected client
   socket.emit("connect-success", { id: shortId });
+  io.emit("host", { id: hostShortId });
+  io.emit("update-peers", buildPeerList());
 
-  // Connect manually via entered ID
-  socket.on("connect-peer", (targetShortId) => {
-    const targetSocketId = idMap.get(targetShortId);
-    if (targetSocketId) {
-      console.log(`🔗 ${shortId} connecting to ${targetShortId}`);
-      io.to(targetSocketId).emit("new-connection", shortId);
-    } else {
-      socket.emit("error-message", `❌ No user found with ID ${targetShortId}`);
+  // Set user name
+  socket.on("set-name", ({ name }) => {
+    const info = peers.get(shortId);
+    if (info) {
+      info.name = name;
+      peers.set(shortId, info);
+    }
+    io.emit("peer-updated", {
+      id: shortId,
+      name,
+      camOn: info.camOn,
+      micOn: info.micOn,
+    });
+    io.emit("update-peers", buildPeerList());
+  });
+
+  // Change camera/mic status
+  socket.on("update-status", (status) => {
+    const info = peers.get(shortId);
+    if (info) {
+      info.camOn = status.camOn;
+      info.micOn = status.micOn;
+      peers.set(shortId, info);
+      io.emit("peer-updated", {
+        id: shortId,
+        name: info.name,
+        camOn: info.camOn,
+        micOn: info.micOn,
+      });
+      io.emit("update-peers", buildPeerList());
     }
   });
 
-  // Chat message handling
+  // Manual peer connection via ID – updates are now handled live by broadcast
+  socket.on("connect-peer", (targetId) => {
+    // No-op: peer list auto-updates, keep for future (direct events)
+  });
+
+  // Leave/Remove functionality
+  socket.on("remove-peer", ({ id }) => {
+    const info = peers.get(id);
+    if (info) {
+      const targetSocketId = info.socketId;
+      io.to(targetSocketId).emit("remove-peer", { id }); // signal client to clean up/leave
+      setTimeout(() => {
+        if (io.sockets.sockets.get(targetSocketId)) {
+          io.sockets.sockets.get(targetSocketId).disconnect(true);
+        }
+      }, 200); // give time for frontend to handle
+    }
+  });
+
+  // Chat
   socket.on("send-message", ({ to, msg }) => {
-    const targetSocketId = idMap.get(to);
-    if (targetSocketId) {
-      io.to(targetSocketId).emit("receive-message", { from: shortId, msg });
+    const toPeer = peers.get(to);
+    if (toPeer) {
+      io.to(toPeer.socketId).emit("receive-message", { from: shortId, msg });
     }
-    console.log(`💬 ${shortId} → ${to}: ${msg}`);
   });
 
-  // Video sync and URL sharing
+  // Video sync
   socket.on("send-video", ({ to, url, action, time }) => {
-    const targetSocketId = idMap.get(to);
-    if (targetSocketId) {
-      io.to(targetSocketId).emit("receive-video", { url, action, time });
+    const toPeer = peers.get(to);
+    if (toPeer) {
+      io.to(toPeer.socketId).emit("receive-video", { url, action, time });
     }
-    console.log(`🎬 ${shortId} → ${to} | ${action || url}`);
   });
 
-  // Handle disconnection
+  // Handle disconnect
   socket.on("disconnect", () => {
-    console.log(`🔴 Disconnected: ${shortId} (${socket.id})`);
-    idMap.delete(shortId);
-    io.emit("user-left", { id: shortId });
+    peers.delete(shortId);
+    socketToShort.delete(socket.id);
+    io.emit("peer-left", { id: shortId });
+
+    // Reassign host if host left
+    if (shortId === hostShortId) {
+      const nextHost = peers.keys().next().value || null;
+      hostShortId = nextHost;
+      io.emit("host", { id: hostShortId });
+    }
+    io.emit("update-peers", buildPeerList());
   });
+
+  // Forcibly leave (user exit) – just disconnects socket
+  socket.on("leave", () => {
+    socket.disconnect();
+  });
+
+  // For troubleshooting, allow full peer list request
+  socket.on("request-peers", () => {
+    socket.emit("update-peers", buildPeerList());
+  });
+
+  // Host info on demand
+  socket.on("get-host", () => socket.emit("host", { id: hostShortId }));
 });
 
-// -------------------------
-// Server Startup
-// -------------------------
 server.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
 });
