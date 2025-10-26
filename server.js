@@ -1,4 +1,3 @@
-// server.js
 const fs = require("fs");
 const http = require("http");
 const https = require("https");
@@ -11,7 +10,6 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Health check route
 app.get("/healthz", (req, res) => {
   res.status(200).json({ status: "ok", uptime: process.uptime() });
 });
@@ -39,11 +37,12 @@ const io = new Server(server, {
   },
 });
 
+// Generate 5 char short id
 function generateShortId() {
   return Math.random().toString(36).substring(2, 7).toUpperCase();
 }
 
-// peers: shortId => { socketId, shortId, name, camOn, micOn }
+// Map shortId => socket info & state
 const peers = new Map();
 const socketToShort = new Map();
 let hostShortId = null;
@@ -54,7 +53,7 @@ const buildPeerList = () =>
     name: p.name,
     camOn: p.camOn,
     micOn: p.micOn,
-    streamId: p.streamId || null,
+    streamId: p.streamId ?? null,
   }));
 
 io.on("connection", (socket) => {
@@ -75,7 +74,6 @@ io.on("connection", (socket) => {
   io.emit("host", { id: hostShortId });
   io.emit("update-peers", buildPeerList());
 
-  // --- Name ---
   socket.on("set-name", ({ name }) => {
     const info = peers.get(shortId);
     if (info) {
@@ -91,7 +89,6 @@ io.on("connection", (socket) => {
     }
   });
 
-  // --- Cam/Mic status (and getUserMedia status broadcast) ---
   socket.on("update-status", (status) => {
     const info = peers.get(shortId);
     if (info) {
@@ -108,7 +105,6 @@ io.on("connection", (socket) => {
     }
   });
 
-  // WebRTC offer/answer signaling
   socket.on("offer", ({ to, signal, name }) => {
     const toPeer = peers.get(to);
     if (toPeer) {
@@ -119,6 +115,7 @@ io.on("connection", (socket) => {
       });
     }
   });
+
   socket.on("answer", ({ to, signal }) => {
     const toPeer = peers.get(to);
     if (toPeer) {
@@ -129,7 +126,6 @@ io.on("connection", (socket) => {
     }
   });
 
-  // --- Chat ---
   socket.on("send-message", ({ to, msg, name }) => {
     const toPeer = peers.get(to);
     if (toPeer) {
@@ -141,7 +137,6 @@ io.on("connection", (socket) => {
     }
   });
 
-  // --- YouTube/video actions ---
   socket.on("send-video", ({ to, url, action, time }) => {
     const toPeer = peers.get(to);
     if (toPeer) {
@@ -149,24 +144,22 @@ io.on("connection", (socket) => {
     }
   });
 
-  // Manual connect still supported for ID (no-op with peer list)
-  socket.on("connect-peer", (targetId) => {});
+  socket.on("connect-peer", () => {
+    // no-op; peer list updates broadcasted anyway
+  });
 
-  // Remove/kick peer
   socket.on("remove-peer", ({ id }) => {
     const info = peers.get(id);
     if (info) {
-      const targetSocketId = info.socketId;
-      io.to(targetSocketId).emit("remove-peer", { id });
+      io.to(info.socketId).emit("remove-peer", { id });
       setTimeout(() => {
-        if (io.sockets.sockets.get(targetSocketId)) {
-          io.sockets.sockets.get(targetSocketId).disconnect(true);
+        if (io.sockets.sockets.get(info.socketId)) {
+          io.sockets.sockets.get(info.socketId).disconnect(true);
         }
       }, 200);
     }
   });
 
-  // --- Cleanup ---
   socket.on("disconnect", () => {
     peers.delete(shortId);
     socketToShort.delete(socket.id);
@@ -180,7 +173,6 @@ io.on("connection", (socket) => {
     io.emit("update-peers", buildPeerList());
   });
 
-  // Leave
   socket.on("leave", () => {
     socket.disconnect();
   });
@@ -189,7 +181,9 @@ io.on("connection", (socket) => {
     socket.emit("update-peers", buildPeerList());
   });
 
-  socket.on("get-host", () => socket.emit("host", { id: hostShortId }));
+  socket.on("get-host", () => {
+    socket.emit("host", { id: hostShortId });
+  });
 });
 
 server.listen(PORT, () => {
