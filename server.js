@@ -37,12 +37,10 @@ const io = new Server(server, {
   },
 });
 
-// Generate 5 char short id
 function generateShortId() {
   return Math.random().toString(36).substring(2, 7).toUpperCase();
 }
 
-// Map shortId => socket info & state
 const peers = new Map();
 const socketToShort = new Map();
 let hostShortId = null;
@@ -144,9 +142,7 @@ io.on("connection", (socket) => {
     }
   });
 
-  socket.on("connect-peer", () => {
-    // no-op; peer list updates broadcasted anyway
-  });
+  socket.on("connect-peer", () => {});
 
   socket.on("remove-peer", ({ id }) => {
     const info = peers.get(id);
